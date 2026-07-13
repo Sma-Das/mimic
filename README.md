@@ -93,15 +93,17 @@ rotates, a `401`/`403` triggers one re-pull from mitmweb and a retry.
 
 ## Limitations
 
-Two auth schemes defeat this by design:
+Two auth schemes get in the way, for different reasons:
 
 - **Certificate pinning** (banking, Instagram). The app rejects the mitmproxy
-  cert, so the proxy never sees the traffic and nothing shows up in
-  `mimic hosts`. Getting past it needs runtime patching (Frida-class), which is
-  out of scope here.
+  cert, so the proxy sees no traffic and nothing shows up in `mimic hosts`. This
+  blocks *capture*, not replay — get past the pin and the rest works normally.
+  `mimic unpin <ipa|bundle-id>` sets up a Frida-based bypass; see
+  [docs/pinning.md](docs/pinning.md).
 - **DPoP / sender-constrained tokens.** Each request carries a fresh proof
-  signed by a private key that never leaves the device. Captured proofs are
-  single-use and bound to one method + URL, so replaying them fails.
+  signed by a private key that never leaves the device, so captured requests
+  don't replay. This defeats the core model, not just capture; there's no clean
+  workaround. See [docs/dpop.md](docs/dpop.md).
 
 If `mimic hosts` shows the app's API host, you're good.
 

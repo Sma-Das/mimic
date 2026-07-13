@@ -4,6 +4,7 @@
     mimic hosts             list captured hosts (pick your API host here)
     mimic learn <host>      show the endpoints mimic saw for a host
     mimic gen <host>        AI-write a Python client for a host
+    mimic unpin <ipa|id>    defeat cert pinning (Frida) so capture works
     mimic doctor            check your setup
 """
 import argparse
@@ -14,6 +15,7 @@ import subprocess
 import sys
 
 from . import codegen
+from . import unpin
 from .sources import mitm
 
 
@@ -101,6 +103,21 @@ def cmd_doctor(args):
         pass
     check("mitmweb running + reachable", reachable,
           "run `mimic record` in another terminal")
+
+    def opt(name, present, fix):
+        # Optional — only needed for `mimic unpin`; never fails the check.
+        print(f"  [{'ok ' if present else '  -'}] {name}")
+        if not present:
+            print(f"          → {fix}")
+
+    print("\noptional — only for `mimic unpin` (pinned apps):")
+    opt("git (fetch unpinning scripts)", shutil.which("git") is not None,
+        "install git (Xcode CLT: xcode-select --install)")
+    opt("frida (run the hooks)", shutil.which("frida") is not None,
+        "pipx install frida-tools   (or: uv tool install frida-tools)")
+    opt("objection (gadget inject, no-JB path)", shutil.which("objection") is not None,
+        "pipx install objection   (or: uv tool install objection)")
+
     print(f"\nLAN IP for the iPhone proxy: {_lan_ip()}:8080")
     sys.exit(0 if ok else 1)
 
@@ -177,6 +194,14 @@ def main(argv=None):
     gp.add_argument("--model", default="sonnet", help="claude model (default: sonnet)")
     gp.add_argument("--prompt-only", action="store_true", help="print the prompt instead of calling claude")
     gp.set_defaults(func=cmd_gen)
+
+    up = sub.add_parser("unpin", help="defeat cert pinning via Frida so capture works")
+    up.add_argument("target", help="a decrypted .ipa (gadget path) or app bundle-id (jailbroken path)")
+    up.add_argument("--ca", help="mitmproxy CA cert (default: ~/.mitmproxy/mitmproxy-ca-cert.pem)")
+    up.add_argument("--proxy-host", help="proxy host to bake in (default: this Mac's LAN IP)")
+    up.add_argument("--workdir", help="where to put scripts + patched IPA (default: mimic-unpin/)")
+    up.add_argument("--codesign", help="signing identity for `objection patchipa`")
+    up.set_defaults(func=unpin.cmd_unpin)
 
     args = p.parse_args(argv)
     args.func(args)
