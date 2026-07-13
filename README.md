@@ -7,7 +7,7 @@ from hinge_client import Hinge
 
 acc = Hinge()                 # reuses your captured session — no keys to wire up
 recs = acc.get_recommendations()
-acc.like(subject_id, comment="empty pools are so peaceful lol")
+acc.like(subject_id, comment="hi lol")
 ```
 
 You never wrote `hinge_client.py`. mimic watched your own app traffic and an AI
