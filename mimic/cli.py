@@ -2,19 +2,24 @@
 
     mimic record            start the proxy + print iPhone setup steps
     mimic hosts             list captured hosts (pick your API host here)
+    mimic clear             permanently delete captured traffic
     mimic learn <host>      show the endpoints mimic saw for a host
     mimic gen <host>        AI-write a Python client for a host
     mimic unpin <ipa|id>    defeat cert pinning (Frida) so capture works
     mimic doctor            check your setup
 """
 import argparse
+import os
 import re
+import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 
 from . import codegen
+from . import proxy
 from . import unpin
 from .sources import mitm
 
@@ -44,14 +49,76 @@ def _mitmweb_cmd():
     return None
 
 
+def _record_command(
+    base, listen_host, proxy_port, web_port, web_token, proxy_credentials=None
+):
+    cmd = base + [
+        "--listen-host",
+        listen_host,
+        "--listen-port",
+        str(proxy_port),
+        "--web-host",
+        "127.0.0.1",
+        "--web-port",
+        str(web_port),
+        "--set",
+        f"web_password={web_token}",
+        "--set",
+        "web_open_browser=false",
+    ]
+    if proxy_credentials:
+        username, password = proxy_credentials
+        cmd += ["--set", f"proxyauth={username}:{password}"]
+    return cmd
+
+
+def _stop_process(proc):
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def cmd_record(args):
-    ip = _lan_ip()
+    ip = args.listen_host or _lan_ip()
+    if ip == "<this-machine-ip>":
+        sys.exit("couldn't determine a LAN address — pass --listen-host <ip>")
+
+    existing = proxy.load_state()
+    if existing and proxy.pid_is_running(existing.get("pid")):
+        sys.exit(
+            f"mimic record is already running (pid {existing['pid']}); "
+            "stop it before starting another capture"
+        )
+    if existing:
+        proxy.clear_state()
+
+    web_token = os.environ.get("MITM_TOKEN") or secrets.token_urlsafe(32)
+    credentials = None
+    if not args.no_proxy_auth:
+        credentials = ("mimic", secrets.token_hex(8))
+
+    auth_steps = ""
+    if credentials:
+        auth_steps = f"""
+        Authentication: ON
+        Username: {credentials[0]}      Password: {credentials[1]}"""
+    else:
+        auth_steps = (
+            "\n        Authentication: OFF "
+            "(--no-proxy-auth; trusted LANs only)"
+        )
+
     print(
         f"""
 iPhone capture — do this once, then just reopen the app to add traffic:
 
   1. iPhone → Settings → Wi-Fi → (your network) ⓘ → Configure Proxy → Manual
-        Server: {ip}      Port: 8080
+        Server: {ip}      Port: {args.proxy_port}{auth_steps}
   2. Safari → http://mitm.it → download the Apple (.pem) profile
   3. Settings → General → VPN & Device Management → install the profile
   4. Settings → General → About → Certificate Trust Settings
@@ -59,7 +126,8 @@ iPhone capture — do this once, then just reopen the app to add traffic:
   5. open the target app and use it normally
   6. back here:   mimic hosts      then   mimic gen <api-host>
 
-  mitmweb dashboard: http://127.0.0.1:8081   (mimic reads flows from here)
+  mitmweb dashboard: http://127.0.0.1:{args.web_port}/?token={web_token}
+  The proxy is bound to {ip}, not every network interface.
 
   Some apps (banks, Instagram) pin their certificate, so a proxy sees no
   usable traffic — those aren't supported. Many apps aren't pinned and just
@@ -72,11 +140,43 @@ iPhone capture — do this once, then just reopen the app to add traffic:
             "no proxy available — install uv (https://astral.sh/uv) so mimic can\n"
             "run mitmproxy for you, or `pipx install mitmproxy` yourself."
         )
+    cmd = _record_command(
+        cmd, ip, args.proxy_port, args.web_port, web_token, credentials
+    )
     sys.stdout.flush()  # show the steps before the proxy takes over the terminal
+    proc = None
+    old_sigterm = signal.getsignal(signal.SIGTERM)
     try:
-        subprocess.run(cmd)
+        proc = subprocess.Popen(cmd)
+        proxy.save_state(
+            {
+                "url": f"http://127.0.0.1:{args.web_port}",
+                "token": web_token,
+                "pid": proc.pid,
+                "proxy_host": ip,
+                "proxy_port": args.proxy_port,
+            }
+        )
+
+        def forward_sigterm(signum, frame):
+            if proc.poll() is None:
+                proc.send_signal(signum)
+
+        signal.signal(signal.SIGTERM, forward_sigterm)
+        returncode = proc.wait()
+        if returncode:
+            sys.exit(f"mitmweb exited with status {returncode}")
+    except KeyboardInterrupt:
+        if proc:
+            _stop_process(proc)
+        print("\nproxy stopped")
     except FileNotFoundError:
         sys.exit("failed to launch mitmweb")
+    finally:
+        if proc:
+            _stop_process(proc)
+        signal.signal(signal.SIGTERM, old_sigterm)
+        proxy.clear_state(token=web_token)
 
 
 def cmd_doctor(args):
@@ -134,6 +234,13 @@ def cmd_hosts(args):
     print("\nPick your API host (usually the one with JSON, not media/cdn).")
 
 
+def cmd_clear(args):
+    m = mitm.Mitm()
+    count = len(m.flows())
+    m.clear()
+    print(f"cleared {count} captured flow{'s' if count != 1 else ''}")
+
+
 def cmd_learn(args):
     m, flows = _mitm_and_flows()
     eps = mitm.endpoints(m, flows, args.host)
@@ -181,9 +288,22 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("record", help="start the proxy + iPhone setup steps").set_defaults(func=cmd_record)
     sub.add_parser("doctor", help="check your setup").set_defaults(func=cmd_doctor)
     sub.add_parser("hosts", help="list captured hosts").set_defaults(func=cmd_hosts)
+    sub.add_parser("clear", help="permanently delete captured flows").set_defaults(
+        func=cmd_clear
+    )
+
+    rp = sub.add_parser("record", help="start the proxy + iPhone setup steps")
+    rp.add_argument("--listen-host", help="LAN address to bind (default: auto-detect)")
+    rp.add_argument("--proxy-port", type=int, default=8080)
+    rp.add_argument("--web-port", type=int, default=8081)
+    rp.add_argument(
+        "--no-proxy-auth",
+        action="store_true",
+        help="disable proxy authentication (trusted LANs only)",
+    )
+    rp.set_defaults(func=cmd_record)
 
     lp = sub.add_parser("learn", help="show endpoints for a host")
     lp.add_argument("host")

@@ -53,7 +53,9 @@ mimic record                    # starts the proxy, prints the iPhone steps
 
 `record` fills in your Mac's LAN IP and walks you through it:
 
-1. iPhone -> Wi-Fi -> Configure Proxy -> Manual -> `<your-mac-ip>:8080`
+1. iPhone -> Wi-Fi -> Configure Proxy -> Manual -> `<your-mac-ip>:8080`, then
+   enter the temporary username and password printed by `record`. The proxy is
+   bound only to this LAN address and requires authentication by default.
 2. Safari -> `http://mitm.it` -> install the Apple profile
 3. Settings -> General -> About -> Certificate Trust Settings -> turn on full
    trust for mitmproxy. This step is easy to miss and nothing works without it.
@@ -65,7 +67,13 @@ Then:
 mimic hosts                     # list captured hosts; pick your API host
 mimic learn  prod-api.hingeaws.net    # see the endpoints mimic saw
 mimic gen    prod-api.hingeaws.net    # generate hinge_client.py
+mimic clear                     # permanently delete all captured flows
 ```
+
+`record` keeps a short-lived web API token in `~/.mimic/proxy.json` with `0600`
+permissions so commands in another terminal can reach mitmweb. The file is
+removed when the proxy stops. On a trusted LAN, `mimic record --no-proxy-auth`
+disables proxy authentication for apps that cannot use it.
 
 Then `from hinge_client import Hinge; Hinge().get_recommendations()`.
 

@@ -1,17 +1,19 @@
 """Read captured traffic from a running mitmweb instance.
 
-mitmweb exposes a JSON API on http://127.0.0.1:8081. Auth is a token passed
-once as a query param, which sets a session cookie; subsequent requests reuse
-the cookie. This module pulls the raw flows and normalizes them into a shape
-that both the runtime Session and the AI codegen step can consume.
+mitmweb exposes a JSON API on http://127.0.0.1:8081. Auth is a bearer token sent
+once to establish a session cookie; subsequent requests reuse the cookie. This
+module pulls the raw flows and normalizes them into a shape that both the
+runtime Session and the AI codegen step can consume.
 """
 import json
 import os
 
 import requests
 
-DEFAULT_URL = os.environ.get("MITM_URL", "http://127.0.0.1:8081")
-DEFAULT_TOKEN = os.environ.get("MITM_TOKEN", "test")
+from .. import proxy
+
+
+DEFAULT_URL = "http://127.0.0.1:8081"
 
 
 class MitmError(RuntimeError):
@@ -21,18 +23,40 @@ class MitmError(RuntimeError):
 class Mitm:
     """A thin client over a running mitmweb's flow API."""
 
-    def __init__(self, url=DEFAULT_URL, token=DEFAULT_TOKEN):
-        self.url = url.rstrip("/")
-        self.token = token
+    def __init__(self, url=None, token=None):
+        state = proxy.load_state() or {}
+        configured_url = url or os.environ.get("MITM_URL")
+        env_token = os.environ.get("MITM_TOKEN")
+        if configured_url:
+            # Never send a token loaded for mimic's local proxy to an unrelated
+            # explicitly configured URL.
+            self.url = configured_url.rstrip("/")
+            self.token = token if token is not None else env_token
+        else:
+            self.url = (state.get("url") or DEFAULT_URL).rstrip("/")
+            self.token = (
+                token
+                if token is not None
+                else env_token or state.get("token")
+            )
         self._http = requests.Session()
 
     def _auth(self):
         try:
-            self._http.get(f"{self.url}/", params={"token": self.token}, timeout=5)
+            headers = (
+                {"Authorization": f"Bearer {self.token}"} if self.token else {}
+            )
+            r = self._http.get(f"{self.url}/", headers=headers, timeout=5)
         except requests.RequestException as e:
             raise MitmError(
                 f"can't reach mitmweb at {self.url} — is it running? "
-                f"start it with `mitmweb` (original error: {e})"
+                f"start it with `mimic record` (original error: {e})"
+            )
+        if r.status_code != 200:
+            raise MitmError(
+                f"mitmweb authentication failed with {r.status_code} — "
+                "start it with `mimic record`, or set MITM_TOKEN for a "
+                "manually managed proxy"
             )
 
     def flows(self):
@@ -48,7 +72,20 @@ class Mitm:
         r = self._http.get(
             f"{self.url}/flows/{flow_id}/{side}/content.data", timeout=15
         )
+        if r.status_code != 200:
+            raise MitmError(f"mitmweb flow body returned {r.status_code}")
         return r.content
+
+    def clear(self):
+        """Permanently remove all in-memory flows and events from mitmweb."""
+        self._auth()
+        xsrf = self._http.cookies.get("_mitmproxy_xsrf") or self._http.cookies.get(
+            "_xsrf"
+        )
+        headers = {"X-XSRFToken": xsrf} if xsrf else {}
+        r = self._http.post(f"{self.url}/clear", headers=headers, timeout=15)
+        if r.status_code not in (200, 204):
+            raise MitmError(f"mitmweb /clear returned {r.status_code}")
 
 
 def _headers_dict(req):
