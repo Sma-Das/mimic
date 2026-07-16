@@ -37,11 +37,21 @@ def _flows_from_args(args):
     return _mitm_and_flows()
 
 
-def _endpoints_from_args(args, m, flows):
+def _endpoints_from_args(args, m, flows, *, include_bodies=True):
     """Endpoints for a host, from HAR (inline bodies) or mitmweb (fetched)."""
     if getattr(args, "har", None):
-        return har.endpoints(args.har, args.host)
-    return mitm.endpoints(m, flows, args.host)
+        return har.endpoints(
+            args.har,
+            args.host,
+            include_bodies=include_bodies,
+            include_telemetry=getattr(args, "include_telemetry", False),
+        )
+    options = {
+        "include_telemetry": getattr(args, "include_telemetry", False),
+    }
+    if not include_bodies:
+        options["include_bodies"] = False
+    return mitm.endpoints(m, flows, args.host, **options)
 
 
 def _lan_ip():
@@ -260,12 +270,17 @@ def cmd_clear(args):
 
 def cmd_learn(args):
     m, flows = _flows_from_args(args)
-    eps = _endpoints_from_args(args, m, flows)
+    eps = _endpoints_from_args(args, m, flows, include_bodies=False)
     if not eps:
         sys.exit(f"no requests to {args.host} found")
     print(f"{args.host}: {len(eps)} endpoints\n")
     for e in eps:
-        print(f"  {e['method']:5s} {e['path']}   -> {e['status']}")
+        count = e.get("sample_count", 1)
+        label = "sample" if count == 1 else "samples"
+        print(
+            f"  {e['method']:5s} {e['path']}   -> {e['status']}"
+            f"   ({count} {label})"
+        )
 
 
 def cmd_gen(args):
@@ -306,7 +321,9 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor", help="check your setup").set_defaults(func=cmd_doctor)
-    sub.add_parser("hosts", help="list captured hosts").set_defaults(func=cmd_hosts)
+    hp = sub.add_parser("hosts", help="list captured hosts")
+    hp.add_argument("--har", metavar="FILE", help="read from a HAR file instead of mitmweb")
+    hp.set_defaults(func=cmd_hosts)
     sub.add_parser("clear", help="permanently delete captured flows").set_defaults(
         func=cmd_clear
     )
@@ -325,11 +342,21 @@ def main(argv=None):
     lp = sub.add_parser("learn", help="show endpoints for a host")
     lp.add_argument("host")
     lp.add_argument("--har", metavar="FILE", help="read from a HAR file instead of mitmweb")
+    lp.add_argument(
+        "--include-telemetry",
+        action="store_true",
+        help="include endpoints that look like analytics or telemetry",
+    )
     lp.set_defaults(func=cmd_learn)
 
     gp = sub.add_parser("gen", help="AI-generate a client for a host")
     gp.add_argument("host")
     gp.add_argument("-o", "--out", help="output .py path")
+    gp.add_argument(
+        "--include-telemetry",
+        action="store_true",
+        help="include endpoints that look like analytics or telemetry",
+    )
     gp.add_argument("--model", default="sonnet", help="model name (claude default: sonnet)")
     gp.add_argument("--generator", default="claude", choices=["claude", "opencode"],
                     help="AI generator to use (default: claude)")

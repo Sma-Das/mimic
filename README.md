@@ -75,7 +75,59 @@ permissions so commands in another terminal can reach mitmweb. The file is
 removed when the proxy stops. On a trusted LAN, `mimic record --no-proxy-auth`
 disables proxy authentication for apps that cannot use it.
 
+### Capture quality
+
+`learn` groups concrete IDs into route templates, so captures such as
+`/users/123` and `/users/456` appear as `/users/{user_id}`. It only reads flow
+metadata; request and response bodies are downloaded later by `gen`.
+
+`gen` keeps up to five diverse samples per normalized endpoint and infers compact
+request and response schemas from their JSON. High-confidence analytics and
+telemetry routes are filtered before body download; pass `--include-telemetry`
+to `learn` or `gen` if a real API route was filtered. Generator input is capped
+at 16 KiB per endpoint and 128 KiB total. Oversized JSON is omitted as a whole
+rather than cut into invalid JSON.
+
 Then `from hinge_client import Hinge; Hinge().get_recommendations()`.
+
+## Safe agent access
+
+Do not give an AI agent a raw `requests.Session` containing captured credentials.
+`mimic.AgentSession` adds an explicit capability boundary: exact-origin checks,
+path and method grants, a request budget, per-call approval for state-changing
+methods, bounded responses, and a secret-minimized audit log.
+
+```python
+from mimic import AgentPolicy, AgentSession, Session
+
+app = Session.from_har("traffic.har", "api.example.com")
+agent = AgentSession(
+    app,
+    AgentPolicy(
+        allowed_methods={"GET", "POST"},
+        path_prefixes=("/v1/lab",),
+        request_budget=25,
+    ),
+)
+
+# Safe methods run inside the granted origin/path scope.
+profile = agent.request("GET", "/v1/lab/profile")
+
+# Mutations need an explicit approval for this individual call.
+result = agent.request(
+    "POST",
+    "/v1/lab/messages",
+    json_body={"text": "hello"},
+    approved=True,
+)
+```
+
+`agent.tool_catalog(endpoints)` turns learned endpoints into deterministic,
+secret-free tool descriptors with JSON input schemas and read/write safety
+metadata. It is the integration seam for an MCP or JSON-RPC adapter; captured
+headers and bodies are never put in those descriptors. See
+[`docs/agent-security.md`](docs/agent-security.md) for the threat model and the
+planned Burp-style security workflow.
 
 ## The library
 
@@ -88,6 +140,11 @@ Session.from_mitm("prod-api.hingeaws.net")        # pull auth from mitmweb
 Session.from_curl(open("copied.txt").read())      # paste "Copy as cURL" from devtools
 Session(base_url="https://x.com", headers={...})  # explicit
 ```
+
+Sessions are same-origin by default. An absolute URL is accepted only when its
+origin matches `base_url`; additional origins must be granted explicitly with
+`allowed_origins`. Requests default to a 30-second timeout and responses are
+limited to 2 MiB before parsing.
 
 `.get(path)`, `.post(path, json=...)`, and the other common HTTP verb helpers
 return parsed JSON and raise `requests.HTTPError` for failed responses. If your
