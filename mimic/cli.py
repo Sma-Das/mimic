@@ -5,6 +5,7 @@
     mimic clear             permanently delete captured traffic
     mimic learn <host>      show the endpoints mimic saw for a host
     mimic gen <host>        AI-write a Python client for a host
+    mimic agent <host>      expose scoped JSON-lines tools to an AI agent
     mimic unpin <ipa|id>    defeat cert pinning (Frida) so capture works
     mimic doctor            check your setup
 """
@@ -21,6 +22,9 @@ import sys
 from . import codegen
 from . import proxy
 from . import unpin
+from .agent import AgentPolicy, AgentSession, MUTATING_METHODS, READ_ONLY_METHODS
+from .control import ControlPlane, PROTOCOL, run_jsonl
+from .session import Session
 from .sources import har
 from .sources import mitm
 
@@ -305,6 +309,66 @@ def cmd_gen(args):
     print("    # then call the generated methods\n")
 
 
+def cmd_agent(args):
+    """Serve a scoped, versioned JSON-lines control plane on stdin/stdout."""
+    if args.har:
+        session = Session.from_har(args.har, args.host)
+        endpoints = har.endpoints(
+            args.har,
+            args.host,
+            include_telemetry=args.include_telemetry,
+        )
+    else:
+        m, flows = _mitm_and_flows()
+        session = Session.from_mitm(args.host, mitm=m)
+        endpoints = mitm.endpoints(
+            m,
+            flows,
+            args.host,
+            include_telemetry=args.include_telemetry,
+        )
+
+    methods = READ_ONLY_METHODS | frozenset(args.allow_method or ())
+    token = None
+    if methods & MUTATING_METHODS:
+        if not args.approval_token_env:
+            sys.exit(
+                "write methods require --approval-token-env NAME; "
+                "the named environment variable supplies the mutation capability"
+            )
+        token = os.environ.get(args.approval_token_env)
+        if not token:
+            sys.exit(
+                f"environment variable {args.approval_token_env!r} is empty or unset"
+            )
+
+    policy = AgentPolicy(
+        allowed_methods=methods,
+        path_prefixes=tuple(args.path_prefix or ("/",)),
+        request_budget=args.request_budget,
+    )
+    control = ControlPlane(
+        AgentSession(session, policy),
+        endpoints,
+        mutation_approval_token=token,
+        max_output_bytes=args.max_output_bytes,
+    )
+    if args.transport == "mcp":
+        from .mcp_adapter import run_mcp
+
+        print(f"MCP stdio server ready for {args.host}", file=sys.stderr)
+        try:
+            run_mcp(control)
+        except RuntimeError as error:
+            sys.exit(str(error))
+    else:
+        print(
+            f"{PROTOCOL} ready for {args.host}; JSON requests on stdin, responses on stdout",
+            file=sys.stderr,
+        )
+        run_jsonl(control, sys.stdin, sys.stdout)
+
+
 def _default_out(host):
     stem = re.sub(r"[^a-z0-9]+", "_", host.split(".")[0].lower()).strip("_")
     return f"{stem or 'app'}_client.py"
@@ -363,6 +427,43 @@ def main(argv=None):
     gp.add_argument("--prompt-only", action="store_true", help="print the prompt instead of calling the AI generator")
     gp.add_argument("--har", metavar="FILE", help="read from a HAR file instead of mitmweb")
     gp.set_defaults(func=cmd_gen)
+
+    ap = sub.add_parser(
+        "agent",
+        help="serve scoped JSON-lines tools for an AI agent",
+    )
+    ap.add_argument("host")
+    ap.add_argument("--har", metavar="FILE", help="read from a HAR file instead of mitmweb")
+    ap.add_argument(
+        "--transport",
+        choices=["mcp", "jsonl"],
+        default="mcp",
+        help="agent protocol on stdio (default: mcp)",
+    )
+    ap.add_argument(
+        "--allow-method",
+        action="append",
+        choices=sorted(MUTATING_METHODS),
+        help="grant a write method in addition to GET/HEAD/OPTIONS (repeatable)",
+    )
+    ap.add_argument(
+        "--path-prefix",
+        action="append",
+        help="limit requests to a URL path prefix (repeatable; default: /)",
+    )
+    ap.add_argument("--request-budget", type=int, default=100)
+    ap.add_argument("--max-output-bytes", type=int, default=64 * 1024)
+    ap.add_argument(
+        "--approval-token-env",
+        metavar="NAME",
+        help="environment variable containing the mutation capability token",
+    )
+    ap.add_argument(
+        "--include-telemetry",
+        action="store_true",
+        help="include observed analytics/telemetry endpoints in tool discovery",
+    )
+    ap.set_defaults(func=cmd_agent)
 
     up = sub.add_parser("unpin", help="defeat cert pinning via Frida so capture works")
     up.add_argument("target", help="a decrypted .ipa (gadget path) or app bundle-id (jailbroken path)")

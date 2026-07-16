@@ -122,12 +122,12 @@ result = agent.request(
 )
 ```
 
-`agent.tool_catalog(endpoints)` turns learned endpoints into deterministic,
-secret-free tool descriptors with JSON input schemas and read/write safety
-metadata. It is the integration seam for an MCP or JSON-RPC adapter; captured
-headers and bodies are never put in those descriptors. See
-[`docs/agent-security.md`](docs/agent-security.md) for the threat model and the
-planned Burp-style security workflow.
+`mimic agent <host>` exposes those tools through MCP over stdio by default, so
+the same executor works with Codex, OpenCode, Claude Code, and other MCP clients.
+A versioned JSON-lines transport remains available for custom harnesses. The
+tool descriptors contain schemas and safety annotations, never captured headers
+or body samples. See [`docs/harnesses.md`](docs/harnesses.md) for setup and
+[`docs/agent-security.md`](docs/agent-security.md) for the threat model.
 
 ## The library
 

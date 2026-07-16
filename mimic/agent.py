@@ -171,6 +171,24 @@ class AgentSession:
                 key: {"type": "string", "description": f"Value for {{{key}}} in the path"}
                 for key in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", path)
             }
+            required = sorted(parameters)
+            parameters["query"] = {
+                "type": "object",
+                "description": "Optional query parameters",
+                "additionalProperties": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "array"},
+                    ]
+                },
+            }
+            schemas = endpoint.get("schemas") or {}
+            if method in MUTATING_METHODS or schemas.get("request"):
+                parameters["json_body"] = schemas.get("request") or {
+                    "type": ["object", "array", "string", "number", "boolean", "null"]
+                }
             tools.append(
                 {
                     "name": name,
@@ -178,7 +196,7 @@ class AgentSession:
                     "input_schema": {
                         "type": "object",
                         "properties": parameters,
-                        "required": sorted(parameters),
+                        "required": required,
                         "additionalProperties": False,
                     },
                     "action": {
@@ -192,7 +210,7 @@ class AgentSession:
                         "sample_count": endpoint.get("sample_count", 1),
                         "statuses": endpoint.get("statuses")
                         or [endpoint.get("status")],
-                        "schemas": endpoint.get("schemas") or {},
+                        "schemas": schemas,
                     },
                 }
             )

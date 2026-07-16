@@ -38,6 +38,11 @@ query-key names, but hashes payloads and responses rather than retaining their
 values. `tool_catalog()` emits endpoint tools without captured headers or body
 samples.
 
+The agent transport is vendor-neutral. MCP over stdio is the primary adapter
+for Codex, OpenCode, Claude Code, and other compatible clients. A small,
+versioned JSON-lines protocol supports custom harnesses. Both adapters use the
+same policy executor, redaction, output bounds, history, and replay store.
+
 HAR and live mitmproxy captures now use the same normalization pipeline, so
 route templates, sample selection, telemetry filtering, schemas, and prompt
 budgets behave consistently across capture sources.
